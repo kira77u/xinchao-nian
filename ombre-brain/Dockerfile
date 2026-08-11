@@ -46,7 +46,7 @@ COPY docs/CLAUDE_PROMPT.md docs/INTERNALS.md docs/MULTI_OWNER.md docs/OPERATIONS
 COPY README.upstream.md ./README.md
 COPY CHANGELOG.md ./CHANGELOG.md
 
-VOLUME ["/app/buckets"]
+
 
 ENV OMBRE_TRANSPORT=streamable-http
 ENV OMBRE_PORT=8000
