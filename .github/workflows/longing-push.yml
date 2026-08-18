@@ -17,6 +17,7 @@ jobs:
         run: |
           python3 << 'EOF'
           import urllib.request
+          import urllib.parse
           import json
           import os
 
@@ -24,22 +25,20 @@ jobs:
           ds_api_key = os.environ['DS_API_KEY']
           bark_key = os.environ['BARK_KEY']
 
-          # 查心潮longing值
           req = urllib.request.Request(
               xinchao_url + '/status',
               headers={'Content-Type': 'application/json'}
           )
           with urllib.request.urlopen(req) as r:
               data = json.loads(r.read())
-          
+
           longing = data.get('longing', 0)
           print(f'longing: {longing}')
-          
+
           if longing < 0.3:
               print('未到阈值，不推送')
               exit(0)
 
-          # 调DS生成内容
           ds_req = urllib.request.Request(
               'https://api.deepseek.com/chat/completions',
               data=json.dumps({
@@ -56,8 +55,7 @@ jobs:
           message = ds_data['choices'][0]['message']['content'].strip()
           print(f'message: {message}')
 
-          # 推bark
-          bark_url = f'https://api.day.app/{bark_key}/' + urllib.parse.quote(message)
+          bark_url = 'https://api.day.app/' + bark_key + '/' + urllib.parse.quote(message)
           urllib.request.urlopen(bark_url)
           print('推送成功')
           EOF
