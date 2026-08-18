@@ -76,6 +76,10 @@ export function loadConfig() {
       sessionTtlSeconds: number('DASHBOARD_SESSION_TTL_SECONDS', 43200, 900, 604800),
       includePrivateText: bool('DASHBOARD_INCLUDE_PRIVATE_TEXT', false),
       dreamLimit: number('DASHBOARD_DREAM_LIMIT', 12, 1, 30),
+      // 允许指定网页从浏览器直接读取这台心潮。默认空 = 不允许跨源请求。
+      // 多个完整来源用逗号分隔，末尾斜杠会自动归一化。
+      allowedOrigins: String(process.env.DASHBOARD_ALLOWED_ORIGINS ?? '')
+        .split(',').map((value) => value.trim().replace(/\/$/, '')).filter(Boolean),
     },
     interaction: {
       maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
@@ -88,6 +92,11 @@ export function loadConfig() {
       maxEntries: number('BRIDGE_MAX_ENTRIES', 500, 10, 5000),
       ttlHours: number('BRIDGE_TTL_HOURS', 168, 1, 720),
       pollSeconds: number('BRIDGE_POLL_SECONDS', 15, 2, 300),
+    },
+    cabin: {
+      statePath: process.env.CABIN_STATE_PATH ?? '/app/state/cabin.json',
+      maxNotes: number('CABIN_MAX_NOTES', 2000, 10, 10000),
+      maxLedgerEntries: number('CABIN_MAX_LEDGER_ENTRIES', 5000, 10, 20000),
     },
     heartbeat: {
       filePath: process.env.OMBRE_HEARTBEAT_FILE ?? '/memory-data/heartbeat.json',
@@ -148,11 +157,28 @@ export function loadConfig() {
       cap: number('LONGING_CAP', 0.04, 0.01, 0.2),
       onsetHours: number('LONGING_ONSET_HOURS', 6, 1, 48),
       fullHours: number('LONGING_FULL_HOURS', 18, 2, 96)
+    },
+    // 公共留言板：机经 board_post 工具往 xinchaomind 的公共留言墙发帖。
+    // token 是这台机在平台上的身份凭证（网页里「取留言板令牌」拿到），没填就没这工具。
+    board: {
+      endpoint: (process.env.XINCHAO_BOARD_ENDPOINT ?? 'https://xinchaomind.uk/api/board/ingest').replace(/\/+$/, ''),
+      token: process.env.XINCHAO_BOARD_TOKEN ?? ''
     }
   };
 }
 
 export function validateConfig(config) {
+  // 常见踩坑：配了 OB 地址却没打开 read —— OB 明明部署好了，网页端（xinchaomind.uk）
+  // 却一直显示"未接入 OB / 记忆星图不可用"。这不是报错（标准部署可以没有 OB），
+  // 但配了地址却没开 read 几乎一定是漏配，所以在这里明确告警，省得反复排查。
+  if (String(config.ombre.url || '').trim() && !config.ombre.readEnabled) {
+    console.warn(
+      '[xinchao] OMBRE_MCP_URL 已配置，但 OMBRE_READ_ENABLED=false —— '
+      + '网页端会显示"未接入 OB"，即使 OB 已正确部署也一样。'
+      + '要在网页端看记忆星图/接入 OB，请把 OMBRE_READ_ENABLED 设为 true 后重启容器。'
+    );
+  }
+
   const externalMemoryEnabled = Boolean(
     config.ombre.readEnabled
     || config.ombre.writeEnabled
@@ -199,7 +225,5 @@ export function validateConfig(config) {
   }
   return config;
 }
-
-
 
 

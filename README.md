@@ -9,12 +9,67 @@
 ## 快速开始
 
 ```bash
-cp .env.example .env      # 填 3 个必填项（OB 压缩 key、Dashboard 密码、内部令牌）
+cp .env.example .env      # 填完文件内标为“必填”的密钥与独立口令
 docker compose up -d --build
 ```
 
-- OB Dashboard：`http://127.0.0.1:18001`（本机，建议再用 Nginx/隧道反代）
 - 两服务在同一 docker 网络内部通信，对外只暴露本机端口。
+- 可视化前端使用 [xinchaomind.uk](https://xinchaomind.uk)，不需要直接访问 OB 端口。
+
+## 连接 Claude.ai MCP 连接器
+
+心潮·念自带 OAuth 2.1 MCP 端点，可直接作为 Claude.ai 的 MCP 连接器使用。
+
+**重要：连接器必须指向心潮（端口 18110），不是 Ombre Brain（端口 18001）。**
+OB 的 18001 端口仅用于 Dashboard 管理和内部通信，不要把它当 MCP 连接器添加到 Claude.ai。
+
+在 `.env` 中启用并重启：
+
+```env
+MCP_ENABLED=true
+OAUTH_ENABLED=true
+OAUTH_PUBLIC_BASE_URL=https://你的心潮公网地址    # 必须 HTTPS，指向心潮 18110 端口的反代
+OAUTH_APPROVAL_TOKEN=自己生成的授权口令至少16字符  # 添加连接器时在授权页面输入这个
+```
+
+然后在 Claude.ai 添加 MCP 连接器，URL 填 `https://你的心潮公网地址/mcp`。
+授权页面会显示「心潮念」，输入你设置的 `OAUTH_APPROVAL_TOKEN` 即可。
+
+如果你看到的授权页面显示的是「Ombre Brain」而不是「心潮念」，说明你连错了端口——
+检查你的反代/隧道是否指向 18110（心潮），而不是 18001（OB）。
+
+## 连接心潮念公开可视化
+
+前提是你已经按上面的步骤部署并启动了心潮·念。`xinchaomind.uk` 是可视化
+前端，不会替你运行心潮，也无法访问另一台设备的 `localhost`。
+
+先在 `.env` 配好并重启：
+
+```env
+DASHBOARD_ENABLED=true
+DASHBOARD_ACCESS_TOKEN=一段至少32字符且与其他密钥不同的随机口令
+DASHBOARD_PUBLIC_BASE_URL=http://localhost:18110
+DASHBOARD_ALLOWED_ORIGINS=https://xinchaomind.uk
+```
+
+然后按使用场景选择：
+
+1. **网页浏览器和心潮在同一台设备**：在网页选择“我的心潮就在这台设备上”，
+   地址填 `http://127.0.0.1:18110`，口令填 `DASHBOARD_ACCESS_TOKEN`。
+2. **用手机访问电脑/主机里的心潮，或心潮跑在 VPS/N100**：先用 Cloudflare
+   Tunnel、Tailscale Funnel 或自己的反向代理给心潮配置公网 HTTPS 地址；把
+   `DASHBOARD_PUBLIC_BASE_URL` 改成该地址并重启，再在网页选择“我的心潮有公网地址”。
+
+只填到域名或端口，不要追加 `/mcp`、`/dashboard` 或 `/v1/dashboard/connect`。
+`SERVICE_TOKEN`、OB token、OAuth 口令都不能代替 Dashboard 独立口令。
+
+> **常见问题：网页端显示"未接入 OB / 记忆星图不可用"。**
+> 这几乎都是 `OMBRE_READ_ENABLED` 没打开——它默认 `false`，跟 OB 是否真的部署成功、能否连接是两回事。
+> 接了 OB 想在网页看记忆星图，务必在 `.env` 设 `OMBRE_READ_ENABLED=true` 并重启容器
+> （联合部署 compose 已默认开好）。配了 `OMBRE_MCP_URL` 却没开 read 时，启动日志也会打一条告警提醒。
+
+完整判断表、配置示例和常见错误见
+[连接公开可视化](docs/CONNECT-XINCHAOMIND.md)。
 
 ## 结构
 

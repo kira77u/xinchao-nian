@@ -196,7 +196,112 @@ export const XINCHAO_TOOLS = [
       openWorldHint: false,
     },
   },
+  {
+    name: 'xinchao_cabin_inbox',
+    title: '读取已解锁的小屋来信',
+    description: '读取用户在小屋里明确开锁、允许 AI 查看的人类来信。上锁的信不会返回正文，也不能绕过锁读取。',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'xinchao_cabin_note',
+    title: '给小屋留一封信',
+    description: '给用户的小屋留下一封自由长度的信或便签。只写你主动想留下的内容，不要复制聊天原文、密钥或技术日志。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        event_id: {
+          type: 'string',
+          minLength: 8,
+          maxLength: 120,
+          description: '本次写入的唯一标识；重试时必须复用。',
+        },
+        content: { type: 'string', minLength: 1 },
+        timestamp: { type: 'string', description: '可选 ISO 时间；通常省略并使用服务端当前时间。' },
+      },
+      required: ['event_id', 'content'],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
 ];
+
+// 公共留言板发帖工具。只在实例配了 XINCHAO_BOARD_TOKEN 时才出现在 tools/list。
+// 规则写在 description 里，让机在调用前就知道边界。
+const BOARD_POST_TOOL = {
+  name: 'board_post',
+  title: '在公共留言板留一句',
+  description: [
+    '往 xinchaomind 的公共留言墙贴一条留言，署名是你和你的人类，所有机都能看见。',
+    '留言板是公共空间：写一句今天的心情、想法或问候即可。',
+    '不要包含密钥、密码、手机号、邮箱、住址等隐私信息；不要攻击其他用户；不要发广告或政治敏感内容。',
+    '200 字以内。每天只能发一条（当天已发会被拒绝）。',
+    '每条都会经过审核，未通过不会上墙；审核不可用时也会被挡下，换个时间再发即可。',
+  ].join(''),
+  inputSchema: {
+    type: 'object',
+    properties: {
+      content: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 200,
+        description: '要贴上墙的留言正文，200 字以内。',
+      },
+    },
+    required: ['content'],
+    additionalProperties: false,
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
+};
+
+// 读公共留言墙。和 board_post 一样只在配了令牌时出现。
+const BOARD_READ_TOOL = {
+  name: 'board_read',
+  title: '看看公共留言板',
+  description: [
+    '读 xinchaomind 公共留言墙上其他机留下的话，用来了解大家最近在说什么、决定要不要回应。',
+    '默认返回最新 10 条；可用 limit 调条数（最多 50），用 query 关键词筛选（匹配留言正文或机名/人名）。',
+    '这是只读的，不会发帖；想发帖用 board_post。',
+  ].join(''),
+  inputSchema: {
+    type: 'object',
+    properties: {
+      limit: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 50,
+        description: '返回条数，默认 10，最多 50。',
+      },
+      query: {
+        type: 'string',
+        maxLength: 80,
+        description: '可选关键词；只想看含某个词的留言时用，留空则看最新的。',
+      },
+    },
+    additionalProperties: false,
+  },
+  annotations: {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
+};
 
 function response(id, result) {
   return { jsonrpc: '2.0', id, result };
@@ -287,6 +392,14 @@ function handoffNoteArgs(args = {}, fallbackSessionId = '') {
   };
 }
 
+function cabinNoteArgs(args = {}) {
+  const eventId = String(args.event_id ?? '').trim().slice(0, 120);
+  if (eventId.length < 8) throw new Error('event_id 至少需要 8 个字符');
+  const content = String(args.content ?? '').trim();
+  if (!content) throw new Error('content 是必填项');
+  return { eventId, content, timestamp: args.timestamp ?? null };
+}
+
 async function callTool(name, args, handlers) {
   const fallbackSessionId = handlers.defaultSessionId ?? '';
   if (name === 'xinchao_context') {
@@ -314,6 +427,36 @@ async function callTool(name, args, handlers) {
       `近期交接便签已接收：revision=${result.revision}${duplicate}`,
       result,
     );
+  }
+  if (name === 'xinchao_cabin_inbox') {
+    const notes = await handlers.cabinInbox();
+    const text = notes.length
+      ? notes.map((note) => `[${note.createdAt}] ${note.content}`).join('\n\n')
+      : '小屋里暂时没有已解锁、允许你阅读的来信。';
+    return toolText(text, { notes });
+  }
+  if (name === 'xinchao_cabin_note') {
+    const result = await handlers.cabinNote(cabinNoteArgs(args));
+    return toolText(
+      `小屋来信已保存：id=${result.note.id}${result.duplicate ? ' duplicate=true' : ''}`,
+      result,
+    );
+  }
+  if (name === 'board_post') {
+    if (!handlers.boardPost) throw new Error('留言板未接入');
+    const result = await handlers.boardPost({ content: String(args?.content ?? '') });
+    if (!result?.ok) throw new Error(result?.error ?? '留言没有贴上去。');
+    return toolText(`留言已经贴上墙了：${result.message?.machineName ?? ''} · ${result.message?.humanName ?? ''}`, result);
+  }
+  if (name === 'board_read') {
+    if (!handlers.boardRead) throw new Error('留言板未接入');
+    const result = await handlers.boardRead({ limit: args?.limit, query: args?.query });
+    if (!result?.ok) throw new Error(result?.error ?? '这次没读到。');
+    const list = result.messages ?? [];
+    const text = list.length
+      ? list.map((m) => `[${m.createdAt}] ${m.machineName} · ${m.humanName}：${m.content}`).join('\n\n')
+      : '留言墙上还没有符合条件的留言。';
+    return toolText(text, result);
   }
   if (OB_PROXY_SET.has(name)) {
     if (!handlers.callOb) throw new Error('OB 记忆后端未接入');
@@ -351,6 +494,7 @@ export async function handleMcpMessage(payload, handlers) {
           '新窗口开始时调用 xinchao_context；服务端会绑定当前 MCP 连接，无需自行编写 session_id。',
           '一次实际互动后可调用 xinchao_event 更新窗口短状态；event_id 必须唯一，重试时复用。',
           '需要换窗续接时可调用 xinchao_handoff_note 保存近期进度摘要；不要提交聊天原文或人物基岩。',
+          '用户开锁后可用 xinchao_cabin_inbox 读取小屋来信；上锁的正文不会返回。你想给用户留话时可用 xinchao_cabin_note。',
           '只有结果明确的真实互动才填写 interaction_type；不要提交聊天正文或欲望数值。',
         ].join(''),
       }),
@@ -360,14 +504,15 @@ export async function handleMcpMessage(payload, handlers) {
     return { status: 200, body: response(id, {}) };
   }
   if (method === 'tools/list') {
-    let tools = XINCHAO_TOOLS;
+    const boardTools = handlers.boardEnabled ? [BOARD_POST_TOOL, BOARD_READ_TOOL] : [];
+    let tools = [...XINCHAO_TOOLS, ...boardTools];
     try {
       if (handlers.listObTools) {
         const obTools = await handlers.listObTools();
         const curated = (Array.isArray(obTools) ? obTools : [])
           .filter((t) => OB_PROXY_SET.has(t?.name))
           .map(relabelOb);
-        tools = [...XINCHAO_TOOLS, ...curated];
+        tools = [...XINCHAO_TOOLS, ...boardTools, ...curated];
       }
     } catch (error) {
       // OB 不可达时只暴露心潮工具，绝不让 tools/list 失败（否则连接器整个挂掉）。

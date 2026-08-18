@@ -123,6 +123,30 @@ export class OmbreClient {
     return this.recentContinuityMaterial(maxTokens);
   }
 
+  // 网页记忆星图只读取 pulse 暴露的桶元数据，不读取正文。公开版当前的
+  // pulse 是人类可读文本；未来融合版若直接返回结构化 JSON，同一适配器也
+  // 会保留 driveSnapshot / driveAffinity 等 3.0 可选字段。
+  async memoryMap() {
+    if (!this.config.readEnabled) return emptyMemoryMap('not_configured');
+    const result = await this.call('pulse', {});
+    return parseMemoryMapText(extractText(result));
+  }
+
+  async memoryBucketPreview(bucketId, maxLines = 7) {
+    if (!this.config.readEnabled) return emptyMemoryPreview(bucketId, 'not_configured');
+    const id = String(bucketId ?? '').trim();
+    if (!/^[A-Za-z0-9._-]{1,160}$/.test(id)) return emptyMemoryPreview(id, 'invalid_id');
+    const url = new URL(this.config.url);
+    url.pathname = `/api/bucket-preview/${encodeURIComponent(id)}`;
+    url.search = '';
+    const headers = { Accept: 'application/json', 'X-Ombre-Caller': 'dynamic-mind' };
+    if (this.config.token) headers.Authorization = `Bearer ${this.config.token}`;
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(10000) });
+    if (response.status === 404) return emptyMemoryPreview(id, 'not_found');
+    if (!response.ok) throw new Error(`Ombre preview failed: HTTP ${response.status}`);
+    return parseMemoryPreviewText(JSON.stringify({ ok: true, ...(await response.json()) }), id, maxLines);
+  }
+
   async storeDream(dream) {
     if (!this.config.writeEnabled) return null;
     const content = [
@@ -194,4 +218,227 @@ function extractText(result) {
   return content.filter((part) => part.type === 'text').map((part) => part.text).join('\n');
 }
 
+function emptyMemoryMap(reason = 'empty') {
+  return {
+    schemaVersion: 2,
+    generatedAt: new Date().toISOString(),
+    available: false,
+    reason,
+    total: 0,
+    stats: {},
+    stars: [],
+    edges: [],
+    capabilities: {
+      explicitRelations: false,
+      driveSnapshots: false,
+      driveAffinity: false,
+      timestamps: false,
+    },
+  };
+}
 
+function emptyMemoryPreview(id, reason = 'empty') {
+  return { schemaVersion: 1, available: false, reason, id: String(id ?? ''), preview: '', lineCount: 0, truncated: false };
+}
+
+export function parseMemoryPreviewText(raw, expectedId = '', maxLines = 7) {
+  const text = String(raw ?? '').trim();
+  if (!text) return emptyMemoryPreview(expectedId, 'empty');
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed?.ok) return emptyMemoryPreview(expectedId, String(parsed?.error || 'not_found'));
+    const id = String(parsed.id ?? expectedId).trim();
+    if (expectedId && id !== expectedId) return emptyMemoryPreview(expectedId, 'id_mismatch');
+    const lineLimit = Math.max(1, Math.min(7, Number(maxLines) || 7));
+    const preview = String(parsed.preview ?? '').split(/\r?\n/).slice(0, lineLimit).join('\n').slice(0, 1400);
+    return {
+      schemaVersion: 1,
+      available: Boolean(preview),
+      reason: preview ? undefined : 'empty',
+      id,
+      preview,
+      lineCount: preview ? preview.split(/\r?\n/).length : 0,
+      truncated: Boolean(parsed.truncated),
+    };
+  } catch {
+    return emptyMemoryPreview(expectedId, 'invalid_response');
+  }
+}
+
+function numberOrNull(value) {
+  if (value == null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeStar(star = {}) {
+  const id = String(star.id ?? star.bucketId ?? star.bucket_id ?? '').trim();
+  if (!id) return null;
+  const pinned = Boolean(star.pinned || star.bucketType === 'permanent' || star.type === 'permanent');
+  const driveSnapshot = star.driveSnapshot ?? star.drive_snapshot ?? null;
+  const driveAffinity = star.driveAffinity ?? star.drive_affinity ?? null;
+  return {
+    id,
+    title: String(star.title ?? star.name ?? '（无题）').trim() || '（无题）',
+    pinned,
+    bucketType: String(star.bucketType ?? star.type ?? (pinned ? 'permanent' : 'dynamic')),
+    domains: Array.isArray(star.domains) ? star.domains.map(String).filter(Boolean)
+      : Array.isArray(star.domain) ? star.domain.map(String).filter(Boolean)
+        : String(star.domain ?? '').split(/[,，]/).map((item) => item.trim()).filter(Boolean),
+    valence: numberOrNull(star.valence),
+    arousal: numberOrNull(star.arousal),
+    importance: numberOrNull(star.importance),
+    weight: numberOrNull(star.weight ?? star.score),
+    tags: Array.isArray(star.tags) ? star.tags.map(String).filter(Boolean)
+      : String(star.tags ?? '').split(/[,，]/).map((item) => item.trim()).filter(Boolean),
+    createdAt: star.createdAt ?? star.created_at ?? null,
+    updatedAt: star.updatedAt ?? star.updated_at ?? null,
+    lastActiveAt: star.lastActiveAt ?? star.last_active ?? null,
+    activationCount: numberOrNull(star.activationCount ?? star.activation_count),
+    anchored: Boolean(star.anchored),
+    resolved: Boolean(star.resolved),
+    historical: star.historical == null ? !driveSnapshot : Boolean(star.historical),
+    meaningCount: Array.isArray(star.meaning) ? star.meaning.length : Number(star.meaningCount ?? 0) || 0,
+    driveSnapshot: driveSnapshot && typeof driveSnapshot === 'object' ? driveSnapshot : null,
+    driveAffinity: driveAffinity && typeof driveAffinity === 'object' ? driveAffinity : null,
+  };
+}
+
+function buildMapEdges(stars, minShared = 3, maxPerNode = 6) {
+  const byTag = new Map();
+  stars.forEach((star, index) => star.tags.forEach((tag) => {
+    if (!byTag.has(tag)) byTag.set(tag, []);
+    byTag.get(tag).push(index);
+  }));
+  const pairs = new Map();
+  for (const indexes of byTag.values()) {
+    if (indexes.length > stars.length * .5) continue;
+    for (let left = 0; left < indexes.length; left += 1) {
+      for (let right = left + 1; right < indexes.length; right += 1) {
+        const key = `${indexes[left]}|${indexes[right]}`;
+        pairs.set(key, (pairs.get(key) || 0) + 1);
+      }
+    }
+  }
+  const candidates = [];
+  for (const [key, shared] of pairs) {
+    if (shared < minShared) continue;
+    const [left, right] = key.split('|').map(Number);
+    const denominator = Math.min(stars[left].tags.length, stars[right].tags.length) || 1;
+    candidates.push({ left, right, shared, similarity: Math.min(1, shared / denominator) });
+  }
+  candidates.sort((a, b) => b.similarity - a.similarity || b.shared - a.shared);
+  const degree = new Array(stars.length).fill(0);
+  const edges = [];
+  for (const candidate of candidates) {
+    if (degree[candidate.left] >= maxPerNode || degree[candidate.right] >= maxPerNode) continue;
+    degree[candidate.left] += 1;
+    degree[candidate.right] += 1;
+    edges.push({
+      source: stars[candidate.left].id,
+      target: stars[candidate.right].id,
+      similarity: Number(candidate.similarity.toFixed(2)),
+      kind: 'tag-derived',
+      label: `${candidate.shared} 个共同标签`,
+    });
+  }
+  return edges;
+}
+
+function normalizeEdges(edges, stars) {
+  const ids = new Set(stars.map((star) => star.id));
+  return (Array.isArray(edges) ? edges : []).flatMap((edge) => {
+    const source = String(edge?.source ?? '').trim();
+    const target = String(edge?.target ?? '').trim();
+    if (!source || !target || source === target || !ids.has(source) || !ids.has(target)) return [];
+    return [{
+      source,
+      target,
+      similarity: Math.max(0, Math.min(1, Number(edge.similarity ?? edge.weight ?? 0) || 0)),
+      kind: edge.kind === 'semantic' || edge.kind === 'tag-derived' ? edge.kind : 'explicit',
+      label: String(edge.label ?? '').slice(0, 120),
+    }];
+  });
+}
+
+export function parseMemoryMapText(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return emptyMemoryMap('empty');
+
+  // 3.0 结构化输出优先；公开版旧 pulse 继续走下方无损文本适配。
+  try {
+    const parsed = JSON.parse(text);
+    const sourceStars = parsed.stars ?? parsed.nodes;
+    if (Array.isArray(sourceStars)) {
+      const stars = sourceStars.map(normalizeStar).filter(Boolean);
+      const explicitEdges = normalizeEdges(parsed.edges ?? parsed.links, stars);
+      const capabilities = {
+        explicitRelations: explicitEdges.length > 0,
+        driveSnapshots: stars.some((star) => star.driveSnapshot),
+        driveAffinity: stars.some((star) => star.driveAffinity),
+        timestamps: stars.some((star) => star.createdAt || star.updatedAt),
+      };
+      return {
+        schemaVersion: Number(parsed.schemaVersion ?? 2),
+        generatedAt: String(parsed.generatedAt ?? new Date().toISOString()),
+        available: true,
+        total: stars.length,
+        stats: parsed.stats && typeof parsed.stats === 'object' ? parsed.stats : {},
+        stars,
+        edges: explicitEdges.length ? explicitEdges : buildMapEdges(stars),
+        capabilities,
+      };
+    }
+  } catch {
+    // 人类可读 pulse 不是 JSON，继续解析；不把解析失败当服务故障。
+  }
+
+  const stats = {};
+  for (const [key, label] of [['pinned', '固化桶'], ['dynamic', '动态桶'], ['archived', '归档桶']]) {
+    const match = text.match(new RegExp(`${label}[:：]\\s*(\\d+)`));
+    if (match) stats[key] = Number(match[1]);
+  }
+  const size = text.match(/总占用[:：]\s*([\d.]+\s*\w+)/);
+  if (size) stats.size = size[1];
+
+  const stars = [];
+  const line = /((?:\uD83D\uDCCC)?)\s*\[([0-9a-f]+)\]\s*《([^》]*)》([^\n]*)/gi;
+  let match;
+  while ((match = line.exec(text)) !== null) {
+    const [, pin, id, title, tail] = match;
+    const domain = (tail.match(/主题[:：]\s*([^\s]+)/) || [])[1] || '';
+    const emotion = tail.match(/情感[:：]\s*V(-?[\d.]+)\/A(-?[\d.]+)/);
+    const importance = (tail.match(/重要[:：]\s*([\d.]+)/) || [])[1];
+    const weight = (tail.match(/权重[:：]\s*([\d.]+)/) || [])[1];
+    const tags = (tail.match(/标签[:：]\s*(.+)$/) || [])[1] || '';
+    stars.push(normalizeStar({
+      id,
+      title,
+      pinned: pin.length > 0,
+      bucketType: pin.length > 0 ? 'permanent' : 'dynamic',
+      domains: domain.split(/[,，]/).filter(Boolean),
+      valence: emotion ? Number(emotion[1]) : null,
+      arousal: emotion ? Number(emotion[2]) : null,
+      importance: importance ? Number(importance) : null,
+      weight: weight ? Number(weight) : null,
+      tags: tags.split(/[,，]/).map((item) => item.trim()).filter(Boolean),
+      historical: true,
+    }));
+  }
+  const filteredStars = stars.filter(Boolean);
+  return {
+    schemaVersion: 2,
+    generatedAt: new Date().toISOString(),
+    available: true,
+    total: filteredStars.length,
+    stats,
+    stars: filteredStars,
+    edges: buildMapEdges(filteredStars),
+    capabilities: {
+      explicitRelations: false,
+      driveSnapshots: false,
+      driveAffinity: false,
+      timestamps: false,
+    },
+  };
+}

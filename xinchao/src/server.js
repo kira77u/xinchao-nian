@@ -16,7 +16,9 @@ import { OAuthProvider } from './oauth-provider.js';
 import { recordHandoffNote } from './handoff-notes.js';
 import { DashboardAuth } from './dashboard-auth.js';
 import { buildConnectionManifest, buildDashboardSnapshot } from './dashboard-projection.js';
-import { BRIDGE_SERVER_PROTOCOL, BRIDGE_STREAM_PROTOCOL, BridgeQueue } from './bridge-queue.js';
+import { BRIDGE_REASONS, BRIDGE_SERVER_PROTOCOL, BRIDGE_STREAM_PROTOCOL, BridgeQueue } from './bridge-queue.js';
+import { CabinStore } from './cabin-store.js';
+import { boardEnabled, postBoardMessage, readBoardMessages } from './board-client.js';
 
 const config = validateConfig(loadConfig());
 if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
@@ -40,6 +42,7 @@ const dashboardAuth = new DashboardAuth({
   secureCookies: config.dashboard.publicBaseUrl.startsWith('https://'),
 });
 const bridgeQueue = new BridgeQueue(config.bridge.statePath, config.bridge);
+const cabin = new CabinStore(config.cabin.statePath, config.cabin);
 const bridgeStreams = new Set();
 await oauth.init();
 let cyclePromise = null;
@@ -451,9 +454,27 @@ async function body(request) {
   let raw = '';
   for await (const chunk of request) {
     raw += chunk;
-    if (raw.length > 64 * 1024) throw new Error('request body too large');
+    if (raw.length > 1024 * 1024) throw new Error('request body too large');
   }
   return raw ? JSON.parse(raw) : {};
+}
+
+/**
+ * 只为 Dashboard 浏览器直连开放受控 CORS。
+ * 默认不放行；部署者必须把完整前端来源写入 DASHBOARD_ALLOWED_ORIGINS。
+ * 直连只使用 Authorization 会话头，不开放跨源 Cookie。
+ */
+function applyDashboardCors(request, response, url) {
+  if (!url.pathname.startsWith('/dashboard/')) return false;
+  const origin = String(request.headers.origin ?? '').replace(/\/$/, '');
+  if (!origin) return false;
+  response.setHeader('Vary', 'Origin');
+  if (!config.dashboard.allowedOrigins.includes(origin)) return false;
+  response.setHeader('Access-Control-Allow-Origin', origin);
+  response.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+  response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  response.setHeader('Access-Control-Max-Age', '600');
+  return true;
 }
 
 function send(response, status, value, extraHeaders = {}) {
@@ -488,7 +509,61 @@ async function dashboardPayload(pathname, url) {
       items: await journal.list(dashboardTimelineOptions(url)),
     };
   }
+  if (pathname.endsWith('/memory-map')) {
+    if (!config.ombre.readEnabled) {
+      return {
+        schemaVersion: 2,
+        generatedAt: new Date().toISOString(),
+        available: false,
+        reason: 'not_configured',
+        total: 0,
+        stats: {},
+        stars: [],
+        edges: [],
+        capabilities: {
+          explicitRelations: false,
+          driveSnapshots: false,
+          driveAffinity: false,
+          timestamps: false,
+        },
+      };
+    }
+    try {
+      return await ombre.memoryMap();
+    } catch (error) {
+      log('dashboard_memory_map_failed', { message: error.message });
+      return {
+        schemaVersion: 2,
+        generatedAt: new Date().toISOString(),
+        available: false,
+        reason: 'ombre_unavailable',
+        total: 0,
+        stats: {},
+        stars: [],
+        edges: [],
+        capabilities: {
+          explicitRelations: false,
+          driveSnapshots: false,
+          driveAffinity: false,
+          timestamps: false,
+        },
+      };
+    }
+  }
+  if (pathname.endsWith('/memory-bucket')) {
+    const bucketId = String(url.searchParams.get('id') ?? '').trim();
+    if (!/^[A-Za-z0-9._-]{1,160}$/.test(bucketId)) {
+      return { schemaVersion: 1, available: false, reason: 'invalid_id', id: bucketId, preview: '', lineCount: 0, truncated: false };
+    }
+    try {
+      return await ombre.memoryBucketPreview(bucketId, 7);
+    } catch (error) {
+      log('dashboard_memory_bucket_failed', { bucket: auditEventFingerprint(bucketId), message: error.message });
+      return { schemaVersion: 1, available: false, reason: 'ombre_unavailable', id: bucketId, preview: '', lineCount: 0, truncated: false };
+    }
+  }
   if (pathname.endsWith('/connect')) return buildConnectionManifest(config);
+  if (pathname.endsWith('/cabin')) return cabin.snapshot();
   return null;
 }
 
@@ -676,16 +751,22 @@ async function enqueueDashboardInteraction(event, result) {
 }
 
 function bridgeDeliveryFromDashboard(payload = {}, now = new Date()) {
-  const allowed = new Set(['event_id', 'eventId', 'message', 'deliver_after', 'deliverAfter']);
+  const allowed = new Set(['event_id', 'eventId', 'message', 'deliver_after', 'deliverAfter', 'reason']);
   const unexpected = Object.keys(payload).filter((key) => !allowed.has(key));
-  if (unexpected.length) throw new Error('bridge delivery only accepts event_id, message and deliver_after');
+  if (unexpected.length) throw new Error('bridge delivery only accepts event_id, message, reason and deliver_after');
   const eventId = String(payload.event_id ?? payload.eventId ?? '').trim();
   const message = String(payload.message ?? '').replace(/\s+/g, ' ').trim();
   const deliverAfter = payload.deliver_after ?? payload.deliverAfter ?? null;
   if (eventId.length < 8 || eventId.length > 120) throw new Error('event_id must contain 8 to 120 characters');
   if (!message || message.length > 1200) throw new Error('message must contain 1 to 1200 characters');
   const scheduled = deliverAfter && Date.parse(deliverAfter) > now.getTime();
-  return { eventId, message, deliverAfter, reason: scheduled ? 'scheduled_interaction' : 'user_note' };
+  // 默认沿用即时=user_note / 定时=scheduled_interaction。显式传入的 reason 若在白名单内、
+  // 且不是 scheduled_interaction，就用它（如 user_feedback —— 同样是用户主动发起的投递）。
+  const requested = String(payload.reason ?? '').trim();
+  const reason = requested && BRIDGE_REASONS.includes(requested) && requested !== 'scheduled_interaction'
+    ? requested
+    : (scheduled ? 'scheduled_interaction' : 'user_note');
+  return { eventId, message, deliverAfter, reason };
 }
 
 function handoffNoteFromHttp(payload = {}) {
@@ -697,9 +778,41 @@ function handoffNoteFromHttp(payload = {}) {
   };
 }
 
+async function enqueueCabinNotice({ eventId, message }) {
+  if (!config.bridge.enabled) return null;
+  const queued = await bridgeQueue.enqueue({ eventId, reason: 'user_note', message });
+  await publishReadyBridgeDeliveries();
+  return { queued: true, duplicate: queued.duplicate, deliveryId: queued.delivery.id };
+}
+
+function cabinNoteInput(payload = {}, defaultFrom = 'user') {
+  return {
+    eventId: payload.event_id ?? payload.eventId,
+    from: payload.from ?? defaultFrom,
+    content: payload.content,
+    timestamp: payload.timestamp,
+    locked: payload.locked,
+  };
+}
+
+function cabinLedgerInput(payload = {}) {
+  return {
+    eventId: payload.event_id ?? payload.eventId,
+    type: payload.type,
+    item: payload.item,
+    amount: payload.amount,
+    date: payload.date,
+  };
+}
+
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, 'http://localhost');
+    const corsAllowed = applyDashboardCors(request, response, url);
+    if (request.method === 'OPTIONS' && url.pathname.startsWith('/dashboard/')) {
+      response.writeHead(corsAllowed ? 204 : 403).end();
+      return;
+    }
     if (request.method === 'GET' && url.pathname === '/health') {
       return send(response, 200, {
         ok: true,
@@ -763,12 +876,17 @@ const server = createServer(async (request, response) => {
         return send(response, 401, { error: 'invalid credentials' });
       }
       const session = dashboardAuth.createSession();
-      log('dashboard_session_created', { sessionExpiresAt: session.expiresAt });
-      return send(response, 200, {
+      // 跨源直连必须由调用方显式选择 header 模式；同源模式仍只下发
+      // HttpOnly Cookie，避免普通 Dashboard 前端接触会话 token。
+      const headerMode = String(payload.mode ?? '').toLowerCase() === 'header';
+      log('dashboard_session_created', { sessionExpiresAt: session.expiresAt, headerMode });
+      const responseBody = {
         ok: true,
         expiresAt: session.expiresAt,
         profile: 'read-only-dashboard',
-      }, { 'Set-Cookie': dashboardAuth.sessionCookie(session.token) });
+      };
+      if (headerMode) return send(response, 200, { ...responseBody, token: session.token });
+      return send(response, 200, responseBody, { 'Set-Cookie': dashboardAuth.sessionCookie(session.token) });
     }
     if (url.pathname === '/dashboard/logout') {
       if (request.method !== 'POST') return send(response, 405, { error: 'method not allowed' }, { Allow: 'POST' });
@@ -811,6 +929,84 @@ const server = createServer(async (request, response) => {
         }
         return send(response, 405, { error: 'method not allowed' }, { Allow: 'GET, POST' });
       }
+      if (url.pathname === '/dashboard/api/cabin/note') {
+        if (request.method === 'POST') {
+          try {
+            const result = await cabin.addNote(cabinNoteInput(await body(request)));
+            let bridge = null;
+            if (result.note.from === 'user' && !result.duplicate) {
+              bridge = await enqueueCabinNotice({
+                eventId: result.note.eventId,
+                message: result.note.locked
+                  ? `${config.identity.notificationRecipient}在小屋里留了一封上锁的信。你可以知道它存在，但在对方主动开锁前不能读取正文。`
+                  : `${config.identity.notificationRecipient}在小屋里留了一封已经允许你阅读的信。请通过“小屋收件箱”读取。`,
+              });
+            }
+            return send(response, result.duplicate ? 200 : 201, { ...result, bridge });
+          } catch (error) {
+            return send(response, 400, { error: error.message });
+          }
+        }
+        if (request.method === 'PATCH') {
+          try {
+            const payload = await body(request);
+            if (payload.read === true || payload.read_all === true) {
+              return send(response, 200, await cabin.markAiNotesRead(payload.ids));
+            }
+            if (typeof payload.locked === 'boolean') {
+              const note = await cabin.setNoteLock(payload.id, payload.locked);
+              if (!note) return send(response, 404, { error: 'note not found' });
+              let bridge = null;
+              if (!note.locked) {
+                bridge = await enqueueCabinNotice({
+                  eventId: `unlock:${note.eventId}`,
+                  message: `${config.identity.notificationRecipient}刚刚打开了小屋里那封信的锁，现在允许你通过“小屋收件箱”读取正文。`,
+                });
+              }
+              return send(response, 200, { note, bridge });
+            }
+            return send(response, 400, { error: 'unsupported note update' });
+          } catch (error) {
+            return send(response, 400, { error: error.message });
+          }
+        }
+        return send(response, 405, { error: 'method not allowed' }, { Allow: 'POST, PATCH' });
+      }
+      if (url.pathname === '/dashboard/api/cabin/ledger') {
+        try {
+          if (request.method === 'POST') {
+            const result = await cabin.addLedger(cabinLedgerInput(await body(request)));
+            const bridge = result.duplicate ? null : await enqueueCabinNotice({
+              eventId: result.entry.eventId,
+              message: `${config.identity.notificationRecipient}在恋爱账本里记下了一笔${result.entry.type === 'expense' ? '支出' : '收入'}：${result.entry.item}，金额 ${result.entry.amount.toFixed(2)}。`,
+            });
+            return send(response, result.duplicate ? 200 : 201, { ...result, bridge });
+          }
+          if (request.method === 'PATCH') {
+            const payload = await body(request);
+            const entry = await cabin.updateLedger(payload.id, payload);
+            if (!entry) return send(response, 404, { error: 'ledger entry not found' });
+            const bridge = await enqueueCabinNotice({
+              eventId: `ledger-edit:${entry.id}:${Date.now()}`,
+              message: `${config.identity.notificationRecipient}更新了恋爱账本中的“${entry.item}”。`,
+            });
+            return send(response, 200, { entry, bridge });
+          }
+          if (request.method === 'DELETE') {
+            const payload = await body(request);
+            const entry = await cabin.deleteLedger(payload.id);
+            if (!entry) return send(response, 404, { error: 'ledger entry not found' });
+            const bridge = await enqueueCabinNotice({
+              eventId: `ledger-delete:${entry.id}:${Date.now()}`,
+              message: `${config.identity.notificationRecipient}从恋爱账本里删除了“${entry.item}”。`,
+            });
+            return send(response, 200, { deleted: true, entry, bridge });
+          }
+        } catch (error) {
+          return send(response, 400, { error: error.message });
+        }
+        return send(response, 405, { error: 'method not allowed' }, { Allow: 'POST, PATCH, DELETE' });
+      }
       if (request.method !== 'GET') return send(response, 405, { error: 'method not allowed' }, { Allow: 'GET' });
       const payload = await dashboardPayload(url.pathname, url);
       return payload ? send(response, 200, payload) : send(response, 404, { error: 'not found' });
@@ -851,6 +1047,12 @@ const server = createServer(async (request, response) => {
           };
         },
         handoffNote: async (note) => saveHandoffNote(note, 'mcp'),
+        cabinInbox: async () => cabin.unlockedUserNotes(),
+        cabinNote: async (note) => cabin.addNote({ ...note, from: 'ai', locked: false }),
+        // 公共留言板：只有配了令牌才把 board_post / board_read 工具暴露出来 / 接受调用。
+        boardEnabled: boardEnabled(config),
+        boardPost: async ({ content }) => postBoardMessage(config, content),
+        boardRead: async ({ limit, query }) => readBoardMessages(config, { limit, query }),
         // 心潮念网关：把 OB 记忆工具经心潮同一端点暴露/转发。
         listObTools: async () => {
           if (!config.ombre.readEnabled) return [];
@@ -942,6 +1144,7 @@ const server = createServer(async (request, response) => {
 
 server.listen(config.port, '0.0.0.0', async () => {
   await store.read();
+  await cabin.init();
   if (config.bridge.enabled) await bridgeQueue.init();
   log('service_started', { port: config.port, shadow: config.shadowMode, modelEnabled: config.model.enabled, barkEnabled: config.bark.enabled, bridgeEnabled: config.bridge.enabled });
 });
@@ -955,7 +1158,3 @@ bridgeTimer.unref();
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => server.close(() => process.exit(0)));
 }
-
-
-
-
