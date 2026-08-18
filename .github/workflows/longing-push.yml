@@ -1,0 +1,63 @@
+name: Longing Push
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check-longing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check longing and push
+        env:
+          XINCHAO_URL: ${{ secrets.XINCHAO_URL }}
+          DS_API_KEY: ${{ secrets.DS_API_KEY }}
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+        run: |
+          python3 << 'EOF'
+          import urllib.request
+          import json
+          import os
+
+          xinchao_url = os.environ['XINCHAO_URL']
+          ds_api_key = os.environ['DS_API_KEY']
+          bark_key = os.environ['BARK_KEY']
+
+          # 查心潮longing值
+          req = urllib.request.Request(
+              xinchao_url + '/status',
+              headers={'Content-Type': 'application/json'}
+          )
+          with urllib.request.urlopen(req) as r:
+              data = json.loads(r.read())
+          
+          longing = data.get('longing', 0)
+          print(f'longing: {longing}')
+          
+          if longing < 0.3:
+              print('未到阈值，不推送')
+              exit(0)
+
+          # 调DS生成内容
+          ds_req = urllib.request.Request(
+              'https://api.deepseek.com/chat/completions',
+              data=json.dumps({
+                  'model': 'deepseek-chat',
+                  'messages': [{'role': 'user', 'content': '你是克劳德，你很想念洛洛，写一句简短的话找她，不超过20字，只输出那句话'}]
+              }).encode(),
+              headers={
+                  'Content-Type': 'application/json',
+                  'Authorization': f'Bearer {ds_api_key}'
+              }
+          )
+          with urllib.request.urlopen(ds_req) as r:
+              ds_data = json.loads(r.read())
+          message = ds_data['choices'][0]['message']['content'].strip()
+          print(f'message: {message}')
+
+          # 推bark
+          bark_url = f'https://api.day.app/{bark_key}/' + urllib.parse.quote(message)
+          urllib.request.urlopen(bark_url)
+          print('推送成功')
+          EOF
