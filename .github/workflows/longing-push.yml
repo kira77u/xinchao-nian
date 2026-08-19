@@ -11,7 +11,7 @@ jobs:
     steps:
       - name: Check and push
         run: |
-          STATUS=$(curl -s -H "Authorization: Bearer ${{ secrets.SERVICE_TOKEN }}" "${{ secrets.XINCHAO_URL }}/status")
+          STATUS=$(curl -s -H "Authorization: Bearer a7f3k9m2p8q4r6s1t5v0w3x7y2z8b4c6" "https://xinchao-nian-production.up.railway.app/status")
           echo "STATUS: $STATUS"
           LONGING=$(echo $STATUS | python3 -c "import sys,json; print(json.load(sys.stdin).get('longing',0))")
           echo "longing: $LONGING"
