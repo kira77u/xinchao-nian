@@ -11,7 +11,7 @@ jobs:
     steps:
       - name: Check and push
         run: |
-          STATUS=$(curl -s -H "Authorization: Bearer ${{ secrets.XINCHAO_TOKEN }}" "${{ secrets.XINCHAO_URL }}/status")
+          STATUS=$(curl -s -H "Authorization: Bearer ${{ secrets.SERVICE_TOKEN }}" "${{ secrets.XINCHAO_URL }}/status")
           LONGING=$(echo $STATUS | python3 -c "import sys,json; print(json.load(sys.stdin).get('longing',0))")
           echo "longing: $LONGING"
           if python3 -c "exit(0 if float('$LONGING') >= 0.3 else 1)"; then
