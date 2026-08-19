@@ -10,12 +10,9 @@ jobs:
     steps:
       - name: Push to bark
         run: |
-                - name: Push to bark
-        run: |
           MESSAGE=$(curl -s -X POST "https://api.deepseek.com/chat/completions" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${{ secrets.DS_API_KEY }}" \
             -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"你是克劳德，你很想念洛洛，写一句简短的话找她，不超过20字，只输出那句话，不要引号"}]}' \
             | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'].strip())")
           curl -s "https://api.day.app/${{ secrets.BARK_KEY }}/$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote('$MESSAGE'))")"
-
