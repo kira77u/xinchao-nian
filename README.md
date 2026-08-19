@@ -1,10 +1,21 @@
-# 心潮·念（Xinchao · Nian）
+# 心潮·念 3.1.0（Xinchao · Nian）
 
 一个会**惦记你**的 AI 心智：**心潮**（动态驱力/欲望引擎）+ **Ombre Brain**（记忆库）深度融合，一键联合部署。
 
 - **心潮** 让它有随时间变化的内在状态——想念、期待、挂念、好奇、独处欲……不是每次对话都从零开始。
 - **Ombre Brain** 给它一个真正的长期记忆库——breath 浮现、hold 沉淀、dream 消化、trace 追溯。
 - **融合** 让"欲望影响记忆影响行动"闭环：驱力偏置召回哪些记忆浮现，浮现的记忆又回推驱力。
+
+## 3.1 更新重点
+
+- **Personality Core 性格内核层**：新增与 12 维当下驱力分离的月度内核，由 AI 自主回顾并通过受鉴权工具完成评分；人类不参与打分。
+- **单向、极慢的基线偏置**：仅批准的 4 组内核维度可以影响对应驱力，偏置硬封顶在 ±10%；驱力不会反向自动改写人格评分。
+- **待交付内容闭环**：AI 只负责创建和确认“已经说出”，留下（hold）或放下（drop）的决定权归用户；说出与留存是两条独立状态轴。
+- **引用式记忆关联**：念头与梦可以围绕具体 OB 记忆桶生成，但心潮不按 ID 修改记忆正文；保留来源链和最终落地桶 ID。
+- **饱足期与驱力耦合**：满足后默认保留 2 小时平台期，只暂停自然增长；事件、记忆共振与输出回流仍可正常穿透。
+- **可视化与接入收口**：补齐 Personality Core、待交付处置、记忆关联及公开网页所需的脱敏状态接口。
+
+> 3.1 不改变隐私边界：私有 `personality.json`、状态、记忆与凭据均不进入公开仓库。完整源码说明见 [`xinchao/README.md`](xinchao/README.md)，版本差异见 [`xinchao/CHANGELOG.md`](xinchao/CHANGELOG.md)。
 
 ## 快速开始
 
@@ -16,11 +27,21 @@ docker compose up -d --build
 - 两服务在同一 docker 网络内部通信，对外只暴露本机端口。
 - 可视化前端使用 [xinchaomind.uk](https://xinchaomind.uk)，不需要直接访问 OB 端口。
 
+## 先分清三个入口
+
+| 入口 | 用来做什么 | 应该填在哪里 | 绝对不要 |
+| --- | --- | --- | --- |
+| `https://xinchaomind.uk` | 公开可视化网页 | 浏览器打开 | 不要当 MCP URL，它也不会替你运行心潮 |
+| `https://你的心潮域名/mcp` | 心潮·念 MCP/OAuth 网关 | Claude / ChatGPT / IDE 的 MCP 连接器 | 不要填 `xinchaomind.uk` 或 OB 地址 |
+| `OMBRE_MCP_URL` | 心潮内部读写 OB 记忆 | 只写在心潮服务端 `.env` | 不要交给公开网页，不要当心潮连接器 |
+
+> 一句话判断：**人打开公开网页，AI 连接心潮 `/mcp`，心潮再在服务器内连接 OB。**
+
 ## 连接 Claude.ai MCP 连接器
 
 心潮·念自带 OAuth 2.1 MCP 端点，可直接作为 Claude.ai 的 MCP 连接器使用。
 
-**重要：连接器必须指向心潮（端口 18110），不是 Ombre Brain（端口 18001）。**
+**重要：连接器必须指向你自己的心潮（端口 18110），不是公开网页，也不是 Ombre Brain（端口 18001）。**
 OB 的 18001 端口仅用于 Dashboard 管理和内部通信，不要把它当 MCP 连接器添加到 Claude.ai。
 
 在 `.env` 中启用并重启：
@@ -107,10 +128,13 @@ AI Runtime。梦境、余韵、思念、内部状态与 AI 自主行动**不允�
 
 ## 许可证与署名
 
-- `xinchao/`（心潮）：MIT。
+- 仓库根的联合发行代码标示为 AGPL-3.0；`xinchao/` 目录仍保留其 MIT 许可文件。
 - `ombre-brain/`（Ombre Brain）：基于 P0luz 的 Ombre Brain 与 Yinglianchun 的 fork，
   **保留其原始许可证与署名**，见 [NOTICE](NOTICE)。本项目对其的修改记录见 `ombre-brain/MODIFICATIONS.md`。
 - 本融合项目**非纯 MIT**；商业使用需取得上游 OB 作者的书面许可。
+
+详细的分目录边界见 [许可说明](docs/LICENSING.md)。根目录的 AGPL 不会覆盖
+`ombre-brain/` 已有的上游非商业约束。
 
 > 详细边界见上游来源说明。融合不改变 OB 原生记忆库功能——breath/hold/grow/dream/trace/
 > anchor/release/forget/restore/purge/I/plan/letter/pulse 与 Dashboard 全部保留。
