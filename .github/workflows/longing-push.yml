@@ -11,6 +11,7 @@ jobs:
       - name: Check longing and push
         run: |
           RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.XINCHAO_SERVICE_TOKEN }}" "${{ secrets.XINCHAO_URL }}/v1/context?mode=inspect")
+          echo "RESPONSE: $RESPONSE"
           LONGING=$(echo $RESPONSE | python3 -c "import sys,json; data=json.load(sys.stdin); print(data.get('longing', data.get('data', {}).get('longing', 0)))")
           echo "longing: $LONGING"
           if python3 -c "exit(0 if float('$LONGING') >= 0.3 else 1)"; then
